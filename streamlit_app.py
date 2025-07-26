@@ -1,172 +1,134 @@
-import datetime
-import random
+# app.py
 
-import altair as alt
-import numpy as np
-import pandas as pd
 import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore", message=".*missing ScriptRunContext.*")
 
-# Show app title and description.
-st.set_page_config(page_title="Support tickets", page_icon="🎫")
-st.title("🎫 Support tickets")
-st.write(
-    """
-    This app shows how you can build an internal tool in Streamlit. Here, we are 
-    implementing a support ticket workflow. The user can create a ticket, edit 
-    existing tickets, and view some statistics.
-    """
+# ─── Page Config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Portfolio Simulation Dashboard",
+    layout="wide"
 )
 
-# Create a random Pandas dataframe with existing tickets.
-if "df" not in st.session_state:
+# ─── Sidebar ───────────────────────────────────────────────────────────────────
+st.sidebar.header("Inputs")
 
-    # Set seed for reproducibility.
-    np.random.seed(42)
+# Tickers
+tickers = [t.strip() for t in st.sidebar.text_input(
+    "Tickers (Assume portfolio has the following)", 
+    value="SPY,AGG,VNQ,DBC"
+).upper().split(",") if t.strip()]
 
-    # Make up some fake issue descriptions.
-    issue_descriptions = [
-        "Network connectivity issues in the office",
-        "Software application crashing on startup",
-        "Printer not responding to print commands",
-        "Email server downtime",
-        "Data backup failure",
-        "Login authentication problems",
-        "Website performance degradation",
-        "Security vulnerability identified",
-        "Hardware malfunction in the server room",
-        "Employee unable to access shared files",
-        "Database connection failure",
-        "Mobile application not syncing data",
-        "VoIP phone system issues",
-        "VPN connection problems for remote employees",
-        "System updates causing compatibility issues",
-        "File server running out of storage space",
-        "Intrusion detection system alerts",
-        "Inventory management system errors",
-        "Customer data not loading in CRM",
-        "Collaboration tool not sending notifications",
-    ]
+# Date range
+col1, col2 = st.sidebar.columns(2)
+start = col1.date_input("Start date", pd.to_datetime("2018-01-01"))
+end   = col2.date_input("End date",   pd.to_datetime("2024-12-31"))
 
-    # Generate the dataframe with 100 rows/tickets.
-    data = {
-        "ID": [f"TICKET-{i}" for i in range(1100, 1000, -1)],
-        "Issue": np.random.choice(issue_descriptions, size=100),
-        "Status": np.random.choice(["Open", "In Progress", "Closed"], size=100),
-        "Priority": np.random.choice(["High", "Medium", "Low"], size=100),
-        "Date Submitted": [
-            datetime.date(2023, 6, 1) + datetime.timedelta(days=random.randint(0, 182))
-            for _ in range(100)
-        ],
-    }
-    df = pd.DataFrame(data)
-
-    # Save the dataframe in session state (a dictionary-like object that persists across
-    # page runs). This ensures our data is persisted when the app updates.
-    st.session_state.df = df
-
-
-# Show a section to add a new ticket.
-st.header("Add a ticket")
-
-# We're adding tickets via an `st.form` and some input widgets. If widgets are used
-# in a form, the app will only rerun once the submit button is pressed.
-with st.form("add_ticket_form"):
-    issue = st.text_area("Describe the issue")
-    priority = st.selectbox("Priority", ["High", "Medium", "Low"])
-    submitted = st.form_submit_button("Submit")
-
-if submitted:
-    # Make a dataframe for the new ticket and append it to the dataframe in session
-    # state.
-    recent_ticket_number = int(max(st.session_state.df.ID).split("-")[1])
-    today = datetime.datetime.now().strftime("%m-%d-%Y")
-    df_new = pd.DataFrame(
-        [
-            {
-                "ID": f"TICKET-{recent_ticket_number+1}",
-                "Issue": issue,
-                "Status": "Open",
-                "Priority": priority,
-                "Date Submitted": today,
-            }
-        ]
-    )
-
-    # Show a little success message.
-    st.write("Ticket submitted! Here are the ticket details:")
-    st.dataframe(df_new, use_container_width=True, hide_index=True)
-    st.session_state.df = pd.concat([df_new, st.session_state.df], axis=0)
-
-# Show section to view and edit existing tickets in a table.
-st.header("Existing tickets")
-st.write(f"Number of tickets: `{len(st.session_state.df)}`")
-
-st.info(
-    "You can edit the tickets by double clicking on a cell. Note how the plots below "
-    "update automatically! You can also sort the table by clicking on the column headers.",
-    icon="✍️",
+# Number of portfolios
+n_portfolios = st.sidebar.slider(
+    "Number of portfolios", 1000, 20_000, 5_000, step=500
 )
 
-# Show the tickets dataframe with `st.data_editor`. This lets the user edit the table
-# cells. The edited data is returned as a new dataframe.
-edited_df = st.data_editor(
-    st.session_state.df,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Status": st.column_config.SelectboxColumn(
-            "Status",
-            help="Ticket status",
-            options=["Open", "In Progress", "Closed"],
-            required=True,
-        ),
-        "Priority": st.column_config.SelectboxColumn(
-            "Priority",
-            help="Priority",
-            options=["High", "Medium", "Low"],
-            required=True,
-        ),
-    },
-    # Disable editing the ID and Date Submitted columns.
-    disabled=["ID", "Date Submitted"],
+# ─── Data Download ──────────────────────────────────────────────────────────────
+@st.cache_data
+def load_data(tickers, start, end):
+    df = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex):
+        prices = df["Adj Close"] if "Adj Close" in df.columns.get_level_values(0) else df["Close"]
+    else:
+        prices = df["Adj Close"] if "Adj Close" in df.columns else df["Close"]
+    returns = prices.pct_change().dropna()
+    return prices, returns
+
+prices, returns = load_data(tickers, start, end)
+
+# ─── Safety Check ───────────────────────────────────────────────────────────────
+if returns.empty:
+    st.error("No return data available for selected tickers and date range.")
+    st.stop()
+
+# ─── Compute Stats ─────────────────────────────────────────────────────────────
+trading_days = len(pd.bdate_range(start=start, end=end))
+mean_daily_ret = returns.mean()
+cov_daily      = returns.cov()
+mean_annual_ret = mean_daily_ret * trading_days
+cov_annual      = cov_daily * trading_days
+
+# Display stats
+st.header("📊 Sample Statistics")
+st.markdown(f"**Trading days in sample:** {trading_days}")
+stats_df = pd.DataFrame({
+    "Mean Ann. Return": mean_annual_ret,
+    "Volatility (Ann.)": np.sqrt(np.diag(cov_annual))
+})
+st.dataframe(stats_df.style.format("{:.2%}"))
+
+with st.expander("📥 Download Stats"):
+    st.download_button("Download stats as CSV", stats_df.to_csv(), file_name="portfolio_stats.csv")
+
+# ─── Monte Carlo Simulation ────────────────────────────────────────────────────
+st.header("🎲 Monte Carlo Portfolio Simulation")
+
+n_assets = len(mean_annual_ret)
+results = np.zeros((3, n_portfolios))
+weights_record = []
+
+for i in range(n_portfolios):
+    w = np.random.random(n_assets)
+    w /= np.sum(w)
+    port_ret = w @ mean_annual_ret
+    port_vol = np.sqrt(w.T @ cov_annual @ w)
+    results[0, i] = port_vol
+    results[1, i] = port_ret
+    results[2, i] = port_ret / port_vol
+    weights_record.append(w)
+
+# ─── Visualization ─────────────────────────────────────────────────────────────
+fig, ax = plt.subplots()
+sc = ax.scatter(
+    results[0], results[1],
+    c=results[2], cmap="viridis", s=10, alpha=0.5
 )
+ax.set_xlabel("Annualized Volatility")
+ax.set_ylabel("Annualized Return")
+ax.set_title(f"Efficient Frontier ({trading_days} trading days)")
+cbar = plt.colorbar(sc, ax=ax)
+cbar.set_label("Sharpe Ratio")
 
-# Show some metrics and charts about the ticket.
-st.header("Statistics")
+# Highlight max Sharpe portfolio
+max_sharpe_idx = results[2].argmax()
+max_vol = results[0, max_sharpe_idx]
+max_ret = results[1, max_sharpe_idx]
+ax.scatter(max_vol, max_ret, color="red", marker="*", s=100, label="Max Sharpe")
+ax.legend()
 
-# Show metrics side by side using `st.columns` and `st.metric`.
-col1, col2, col3 = st.columns(3)
-num_open_tickets = len(st.session_state.df[st.session_state.df.Status == "Open"])
-col1.metric(label="Number of open tickets", value=num_open_tickets, delta=10)
-col2.metric(label="First response time (hours)", value=5.2, delta=-1.5)
-col3.metric(label="Average resolution time (hours)", value=16, delta=2)
+st.pyplot(fig)
 
-# Show two Altair charts using `st.altair_chart`.
-st.write("")
-st.write("##### Ticket status per month")
-status_plot = (
-    alt.Chart(edited_df)
-    .mark_bar()
-    .encode(
-        x="month(Date Submitted):O",
-        y="count():Q",
-        xOffset="Status:N",
-        color="Status:N",
-    )
-    .configure_legend(
-        orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
-    )
-)
-st.altair_chart(status_plot, use_container_width=True, theme="streamlit")
+# ─── Max Sharpe Portfolio Weights ──────────────────────────────────────────────
+st.subheader("⭐ Max Sharpe Portfolio")
+st.markdown(f"""
+- **Annualized Return:** {max_ret:.2%}  
+- **Annualized Volatility:** {max_vol:.2%}  
+- **Sharpe Ratio:** {results[2, max_sharpe_idx]:.2f}
+""")
 
-st.write("##### Current ticket priorities")
-priority_plot = (
-    alt.Chart(edited_df)
-    .mark_arc()
-    .encode(theta="count():Q", color="Priority:N")
-    .properties(height=300)
-    .configure_legend(
-        orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
-    )
-)
-st.altair_chart(priority_plot, use_container_width=True, theme="streamlit")
+opt_weights = weights_record[max_sharpe_idx]
+opt_df = pd.DataFrame({
+    "Ticker": mean_annual_ret.index,
+    "Weight": opt_weights
+}).set_index("Ticker")
+
+st.dataframe(opt_df.style.format("{:.2%}"))
+
+# ─── Show Data Samples ─────────────────────────────────────────────────────────
+with st.expander("🔍 Show last 5 rows of prices & returns"):
+    st.subheader("Prices")
+    st.dataframe(prices.tail())
+    st.subheader("Returns")
+    st.dataframe(returns.tail())
+
+
