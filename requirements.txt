@@ -1,1 +1,1 @@
-streamlit
+streamlit\nyfinance\npandas\nnumpy\nmatplotlib\nscipy
